@@ -1,0 +1,880 @@
+openapi: 3.0.3
+info:
+  title: «Вертикаль» — Client API
+  description: >
+    API клиентского веб-приложения скалодрома «Вертикаль». Скоуп — только роль «Клиент»:
+    просмотр расписания тренировок, запись, отмена, оценка инструктора, профиль, уведомления.
+    Слоты/зоны/инструкторы — read-only данные существующего бэкенда; клиентский API их не
+    создаёт и не редактирует. Атомарность бронирования и гарантия «0 двойных броней»
+    обеспечиваются на стороне сервера.
+    Источники: business-requirements.md, functional-requirements.md,
+    non-functional-requirements.md, use-cases.md, user-stories.md, domain-description.md,
+    00-foundations.md, SCR-00*/BS-00*.
+  version: "0.1.0"
+  contact:
+    name: Аналитика проекта «Вертикаль»
+
+servers:
+  - url: https://api.vertical-climbing.example/v1
+    description: Основной API (пример адреса)
+
+tags:
+  - name: Auth
+    description: Вход/регистрация клиента (FR-1, FR-2)
+  - name: Slots
+    description: Просмотр и фильтрация тренировок (FR-9, FR-10, FR-11)
+  - name: Bookings
+    description: Запись, отмена, история бронирований (FR-15…FR-30)
+  - name: Ratings
+    description: Оценка инструктора (FR-40, FR-41)
+  - name: Profile
+    description: Профиль клиента (FR-33, FR-34)
+  - name: Notifications
+    description: Web Push подписки (FR-48, NFR-17)
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ==================== AUTH ====================
+  /auth/otp/request:
+    post:
+      tags: [Auth]
+      summary: Запросить одноразовый SMS-код для входа/регистрации
+      description: >
+        Rate-limit: не более ~1 запроса кода в 30–60 с на номер и не более ~5 запросов в час
+        на номер/устройство (NFR-19).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone:
+                  type: string
+                  example: "+79991234567"
+      responses:
+        "202":
+          description: Код отправлен
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  retry_after_seconds:
+                    type: integer
+                    example: 45
+                  code_ttl_seconds:
+                    type: integer
+                    example: 300
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /auth/otp/verify:
+    post:
+      tags: [Auth]
+      summary: Подтвердить SMS-код и войти/зарегистрироваться
+      description: >
+        Ограничено число попыток ввода кода (≤5) до временной блокировки (NFR-19). Если
+        клиент новый — сервер вернёт `is_new_client: true`, и клиент должен передать `name`
+        (можно этим же вызовом, если UI уже собрал имя, либо отдельным PATCH /profile).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, code]
+              properties:
+                phone:
+                  type: string
+                  example: "+79991234567"
+                code:
+                  type: string
+                  example: "482913"
+                name:
+                  type: string
+                  description: Обязателен, если клиент новый (первый вход по этому номеру)
+                  example: "Тори Иванова"
+      responses:
+        "200":
+          description: Успешный вход
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Неверный код (`invalid_code`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: invalid_code
+                message: "Неверный код. Попробуйте ещё раз"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /auth/telegram:
+    post:
+      tags: [Auth]
+      summary: Вход или привязка через Telegram Login Widget
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [telegram_init_data]
+              properties:
+                telegram_init_data:
+                  type: string
+                  description: Подписанные данные из Telegram Login Widget
+      responses:
+        "200":
+          description: Успешный вход
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Обновить access-токен по refresh-cookie (NFR-18)
+      description: >
+        Refresh-токен передаётся автоматически браузером через httpOnly+Secure+SameSite=Strict
+        cookie. Требует CSRF-заголовка на мутирующих запросах.
+      security: []
+      responses:
+        "200":
+          description: Новый access-токен выдан
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  expires_in:
+                    type: integer
+                    example: 900
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Выйти из аккаунта (FR-34)
+      description: Инвалидирует refresh-cookie на сервере; клиент дополнительно сбрасывает access из памяти.
+      responses:
+        "204":
+          description: Выход выполнен
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ==================== SLOTS ====================
+  /slots:
+    get:
+      tags: [Slots]
+      summary: Список тренировок (FR-9, FR-11)
+      description: >
+        По умолчанию — тренировки на ближайшие 7 дней от текущего момента
+        (`date_from = now`, `date_to = now + 7 дней`), отсортированные по времени старта.
+        Заполненные и отменённые скалодромом слоты не скрываются из выдачи.
+        Фильтры внутри одной группы комбинируются по ИЛИ, между группами — по И.
+      parameters:
+        - name: date_from
+          in: query
+          description: Включительно, ISO 8601, локальная таймзона клиента на входе, хранение в UTC
+          schema: { type: string, format: date }
+        - name: date_to
+          in: query
+          description: Включительно
+          schema: { type: string, format: date }
+        - name: zone_format
+          in: query
+          description: Повторяемый параметр; значения объединяются по ИЛИ
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/ZoneFormat"
+          style: form
+          explode: true
+        - name: instructor_id
+          in: query
+          description: Повторяемый параметр; значения объединяются по ИЛИ
+          schema:
+            type: array
+            items: { type: string, format: uuid }
+          style: form
+          explode: true
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        "200":
+          description: Список слотов (может быть пустым — см. empty state на клиенте)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Slot" }
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /slots/{slotId}:
+    get:
+      tags: [Slots]
+      summary: Карточка тренировки (FR-10)
+      parameters:
+        - $ref: "#/components/parameters/SlotId"
+      responses:
+        "200":
+          description: Слот найден
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Slot" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ==================== BOOKINGS ====================
+  /bookings:
+    get:
+      tags: [Bookings]
+      summary: Мои бронирования (FR-25)
+      parameters:
+        - name: scope
+          in: query
+          description: Предстоящие или прошедшие (по времени старта слота)
+          schema:
+            type: string
+            enum: [upcoming, past]
+            default: upcoming
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        "200":
+          description: Список бронирований клиента
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Booking" }
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      tags: [Bookings]
+      summary: Записаться на тренировку (FR-15…FR-23, UC-1)
+      description: >
+        Атомарная проверка мест/проката и создание брони выполняются на сервере.
+        Обязателен заголовок `Idempotency-Key`: повтор той же операции с тем же ключом и тем
+        же телом возвращает идентичный ответ и не создаёт дубль брони.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slot_id, equipment_choice]
+              properties:
+                slot_id: { type: string, format: uuid }
+                equipment_choice:
+                  $ref: "#/components/schemas/EquipmentChoice"
+      responses:
+        "201":
+          description: Бронь создана
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Тренировка только для новичков, флаг «новичок» не установлен
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                code: beginner_flag_required
+                message: "Тренировка только для новичков"
+                details: { slot_id: "b2b0e6b0-0000-0000-0000-000000000001" }
+        "409":
+          description: Конфликт состояния — нет мест/проката либо бронь уже есть
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                slot_full:
+                  value:
+                    code: slot_full
+                    message: "Мест не осталось"
+                    details: { available_seats: 0 }
+                rental_unavailable:
+                  value:
+                    code: rental_unavailable
+                    message: "Прокатного снаряжения не осталось"
+                    details: { available_rental_items: 0 }
+                double_booking:
+                  value:
+                    code: double_booking
+                    message: "Вы уже записаны на эту тренировку"
+                    details: { booking_id: "c1a0e6b0-0000-0000-0000-000000000002" }
+        "410":
+          description: Слот отменён скалодромом
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                code: slot_cancelled
+                message: "Тренировка отменена скалодромом"
+                details: { slot_id: "b2b0e6b0-0000-0000-0000-000000000001" }
+        "422":
+          description: Тренировка уже началась/прошла
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                code: slot_started
+                message: "Тренировка уже началась, запись недоступна"
+                details: { slot_id: "b2b0e6b0-0000-0000-0000-000000000001", start_at: "2026-07-07T15:00:00Z" }
+
+  /bookings/{bookingId}:
+    get:
+      tags: [Bookings]
+      summary: Детали брони (SCR-006)
+      parameters:
+        - $ref: "#/components/parameters/BookingId"
+      responses:
+        "200":
+          description: Бронь найдена
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /bookings/{bookingId}/cancel:
+    post:
+      tags: [Bookings]
+      summary: Отменить бронь целиком (FR-26…FR-28, UC-2)
+      description: >
+        Отмена — только целиком, частичная отмена не поддерживается. Тип отмены
+        (ранняя/поздняя) определяет **сервер** по времени до старта: `≥ 2 ч` → `cancelled`
+        (место освобождается), `< 2 ч` → `late_cancel` (место не освобождается, штрафов нет).
+        Граница «ровно 2 часа» трактуется как ранняя отмена.
+      parameters:
+        - $ref: "#/components/parameters/BookingId"
+      responses:
+        "200":
+          description: Бронь отменена (ранняя или поздняя — см. `status` в ответе)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Бронь уже отменена
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                code: already_cancelled
+                message: "Бронь уже отменена"
+        "422":
+          description: Тренировка уже началась/прошла
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                code: slot_started
+                message: "Тренировка уже началась, отмена недоступна"
+
+  # ==================== RATINGS ====================
+  /bookings/{bookingId}/rating:
+    post:
+      tags: [Ratings]
+      summary: Оценить инструктора после посещённой тренировки (FR-40, UC-4)
+      description: Разовая оценка; изменение уже отправленной оценки не поддерживается.
+      parameters:
+        - $ref: "#/components/parameters/BookingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stars]
+              properties:
+                stars:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                comment:
+                  type: string
+                  nullable: true
+                  maxLength: 1000
+      responses:
+        "201":
+          description: Оценка сохранена
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rating" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Оценка уже поставлена, либо тренировка ещё не завершилась
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                already_rated:
+                  value: { code: already_rated, message: "Вы уже оценили эту тренировку" }
+                not_completed:
+                  value: { code: booking_not_completed, message: "Тренировка ещё не завершилась" }
+    get:
+      tags: [Ratings]
+      summary: Получить ранее поставленную оценку (режим «только чтение»)
+      parameters:
+        - $ref: "#/components/parameters/BookingId"
+      responses:
+        "200":
+          description: Оценка найдена
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rating" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Оценка ещё не поставлена
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  # ==================== PROFILE ====================
+  /profile:
+    get:
+      tags: [Profile]
+      summary: Получить данные профиля (FR-33)
+      responses:
+        "200":
+          description: Профиль клиента
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Client" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    patch:
+      tags: [Profile]
+      summary: Изменить имя (FR-33)
+      description: Смена имени не требует подтверждения кодом. Для смены телефона — см. /profile/phone/*.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          description: Профиль обновлён
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Client" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /profile/phone/request-change:
+    post:
+      tags: [Profile]
+      summary: Запросить смену номера телефона (шаг 1 — код из SMS)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_phone]
+              properties:
+                new_phone: { type: string, example: "+79997654321" }
+      responses:
+        "202":
+          description: Код отправлен на новый номер
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          description: Номер уже используется другим клиентом
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /profile/phone/confirm-change:
+    post:
+      tags: [Profile]
+      summary: Подтвердить смену номера телефона (шаг 2 — код из SMS)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_phone, code]
+              properties:
+                new_phone: { type: string }
+                code: { type: string }
+      responses:
+        "200":
+          description: Телефон обновлён
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Client" }
+        "401":
+          description: Неверный код (`invalid_code`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /profile/telegram:
+    post:
+      tags: [Profile]
+      summary: Привязать Telegram (FR-2, NFR-26)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [telegram_init_data]
+              properties:
+                telegram_init_data: { type: string }
+      responses:
+        "200":
+          description: Telegram привязан
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Client" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    delete:
+      tags: [Profile]
+      summary: Отвязать Telegram
+      description: Не блокирует вход — вход по номеру телефона сохраняется всегда.
+      responses:
+        "204":
+          description: Telegram отвязан
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ==================== NOTIFICATIONS ====================
+  /notifications/web-push-subscriptions:
+    post:
+      tags: [Notifications]
+      summary: Зарегистрировать Web Push подписку (FR-48, NFR-17)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebPushSubscription"
+      responses:
+        "201":
+          description: Подписка зарегистрирована
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    delete:
+      tags: [Notifications]
+      summary: Удалить Web Push подписку (например, при отзыве разрешения)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint]
+              properties:
+                endpoint: { type: string, format: uri }
+      responses:
+        "204":
+          description: Подписка удалена
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Access-токен (короткоживущий, ~15 мин, NFR-18). Refresh — в httpOnly cookie,
+        в спецификации не отображается как заголовок.
+
+  parameters:
+    SlotId:
+      name: slotId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    BookingId:
+      name: bookingId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID, генерируется клиентом на каждую попытку создания брони.
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Невалидные данные запроса
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Токен истёк или отсутствует — клиент переходит на экран входа
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Доступ к чужим данным запрещён (NFR-12)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Ресурс не найден
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: Превышен лимит запросов (NFR-19)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            code: rate_limited
+            message: "Слишком много попыток"
+            details: { retry_after: 60 }
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Машиночитаемый код ошибки (см. матрицу ошибок UC-1)
+          example: slot_full
+        message:
+          type: string
+          example: "Мест не осталось"
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    Pagination:
+      type: object
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+
+    AuthResult:
+      type: object
+      properties:
+        access_token: { type: string }
+        expires_in: { type: integer, example: 900 }
+        is_new_client: { type: boolean }
+        client: { $ref: "#/components/schemas/Client" }
+
+    Client:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: "Тори Иванова" }
+        phone: { type: string, example: "+7 999 123-45-67" }
+        is_beginner:
+          type: boolean
+          description: Read-only, приходит из бэкенда/профиля (BR-6)
+        telegram_linked: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    ZoneFormat:
+      type: string
+      enum: [boulder_beginner, rope_advanced]
+      description: Болдеринг с инструктажем для новичков / трассы с верёвкой для опытных
+
+    Instructor:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: "Анна" }
+        avg_rating:
+          type: number
+          format: float
+          nullable: true
+          description: null, если оценок ещё нет — клиент показывает «Нет оценок» (FR-41)
+          example: 4.8
+
+    RentalInfo:
+      type: object
+      properties:
+        available: { type: boolean, description: "Доступность проката отдельно от мест (FR-19)" }
+        available_items: { type: integer }
+        low_stock_warning:
+          type: boolean
+          description: Показать плашку о возможной нехватке инвентаря (FR-20)
+        tariff:
+          type: number
+          format: float
+          description: Тариф в рублях за единицу проката, оплата офлайн (FR-21)
+
+    Slot:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        start_at: { type: string, format: date-time, description: "UTC (R-021)" }
+        duration_min: { type: integer, example: 90 }
+        zone_format: { $ref: "#/components/schemas/ZoneFormat" }
+        is_beginner_only: { type: boolean }
+        instructor: { $ref: "#/components/schemas/Instructor" }
+        capacity_total: { type: integer, example: 16 }
+        free_seats: { type: integer, example: 3 }
+        status:
+          type: string
+          enum: [scheduled, full, cancelled_by_gym]
+          description: Производные статусы для отображения (FR-9); слот не скрывается из списка
+        cancel_reason:
+          type: string
+          nullable: true
+          description: Причина отмены скалодромом, если status = cancelled_by_gym
+        rental: { $ref: "#/components/schemas/RentalInfo" }
+        gym_address:
+          type: string
+          description: Адрес скалодрома (одна площадка)
+
+    EquipmentChoice:
+      type: string
+      enum: [own, rental]
+      description: Выбирается на уровне каждой брони, не сохраняется как настройка профиля (FR-18)
+
+    BookingStatus:
+      type: string
+      enum:
+        - active
+        - cancelled_early
+        - cancelled_late
+        - cancelled_by_gym
+        - completed
+      description: >
+        active — активна; cancelled_early — ранняя отмена (≥2ч, место освобождено);
+        cancelled_late — поздняя отмена (<2ч, место не освобождено, без штрафов);
+        cancelled_by_gym — «Отменена скалодромом» (см. cancel_reason); completed — тренировка
+        состоялась.
+
+    Booking:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slot: { $ref: "#/components/schemas/Slot" }
+        equipment_choice: { $ref: "#/components/schemas/EquipmentChoice" }
+        rental_tariff_snapshot:
+          type: number
+          nullable: true
+          description: Тариф проката, зафиксированный на момент брони (если equipment_choice = rental)
+        status: { $ref: "#/components/schemas/BookingStatus" }
+        cancel_reason:
+          type: string
+          nullable: true
+          description: Заполняется, если status = cancelled_by_gym
+        created_at: { type: string, format: date-time }
+        cancelled_at: { type: string, format: date-time, nullable: true }
+        rating:
+          allOf:
+            - $ref: "#/components/schemas/Rating"
+          nullable: true
+          description: Присутствует, если клиент уже оценил инструктора по этой брони
+
+    Rating:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        booking_id: { type: string, format: uuid }
+        instructor_id: { type: string, format: uuid }
+        stars: { type: integer, minimum: 1, maximum: 5 }
+        comment: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        editable:
+          type: boolean
+          description: Всегда false после создания (FR-40)
+          default: false
+
+    WebPushSubscription:
+      type: object
+      required: [endpoint, keys]
+      properties:
+        endpoint: { type: string, format: uri }
+        keys:
+          type: object
+          required: [p256dh, auth]
+          properties:
+            p256dh: { type: string }
+            auth: { type: string }
