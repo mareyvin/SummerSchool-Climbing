@@ -1,0 +1,94 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Client {
+  id                   String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  phone                String                @unique(map: "uq_clients_phone") @db.VarChar(20)
+  name                 String                @db.VarChar(255)
+  telegramId           String?               @unique(map: "uq_clients_telegram") @map("telegram_id") @db.VarChar(64)
+  isBeginner           Boolean               @default(false) @map("is_beginner")
+  createdAt            DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime              @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  bookings             Booking[]
+  notifications        NotificationLog[]
+  webPushSubscriptions WebPushSubscription[]
+
+  @@map("clients")
+}
+
+model Booking {
+  id                     String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  clientId               String            @map("client_id") @db.Uuid
+  slotId                 String            @map("slot_id") @db.Uuid
+  instructor_id          String            @db.Uuid
+  equipmentChoice        String            @map("equipment_choice") @db.VarChar(10)
+  status                 String            @default("active") @db.VarChar(20)
+  cancel_reason          String?
+  idempotencyKey         String            @map("idempotency_key") @db.Uuid
+  idempotency_body_hash  String            @db.Char(64)
+  createdAt              DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  cancelledAt            DateTime?         @map("cancelled_at") @db.Timestamptz(6)
+  slot_start_at_snapshot DateTime          @db.Timestamptz(6)
+  zone_format_snapshot   String
+  duration_min_snapshot  Int               @default(90) @db.SmallInt
+  client                 Client            @relation(fields: [clientId], references: [id], onUpdate: NoAction)
+  notifications_log      NotificationLog[]
+  rating                 Rating?
+
+  @@unique([clientId, idempotencyKey], map: "uq_bookings_client_idempotency")
+  @@index([clientId], map: "ix_bookings_client_id")
+  @@index([instructor_id], map: "ix_bookings_instructor_id")
+  @@index([slotId], map: "ix_bookings_slot_id")
+  @@index([status], map: "ix_bookings_status")
+  @@map("bookings")
+}
+
+model Rating {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bookingId    String   @unique(map: "uq_ratings_booking") @map("booking_id") @db.Uuid
+  clientId     String   @map("client_id") @db.Uuid
+  instructorId String   @map("instructor_id") @db.Uuid
+  stars        Int      @db.SmallInt
+  comment      String?
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  booking      Booking  @relation(fields: [bookingId], references: [id], onUpdate: NoAction)
+
+  @@index([instructorId], map: "ix_ratings_instructor_id")
+  @@map("ratings")
+}
+
+model WebPushSubscription {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  clientId   String    @map("client_id") @db.Uuid
+  endpoint   String
+  p256dh     String
+  auth       String
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  revoked_at DateTime? @db.Timestamptz(6)
+  client     Client    @relation(fields: [clientId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([clientId, endpoint], map: "uq_push_client_endpoint")
+  @@map("web_push_subscriptions")
+}
+
+model NotificationLog {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  clientId  String   @map("client_id") @db.Uuid
+  bookingId String?  @map("booking_id") @db.Uuid
+  type      String   @db.VarChar(30)
+  channel   String   @db.VarChar(20)
+  status    String   @default("sent") @db.VarChar(20)
+  sentAt    DateTime @default(now()) @map("sent_at") @db.Timestamptz(6)
+  bookings  Booking? @relation(fields: [bookingId], references: [id], onUpdate: NoAction)
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([bookingId], map: "ix_notif_booking_id")
+  @@index([clientId], map: "ix_notif_client_id")
+  @@map("notifications_log")
+}

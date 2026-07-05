@@ -1,0 +1,76 @@
+# Локальное окружение "Вертикали": Postgres + Redis (+ Adminer как GUI для базы).
+# API по умолчанию НЕ запускается в докере — проще всего гонять его локально через `npm run dev`
+# (см. README.md). Если нужно поднять API тоже в докере — сервис "api" ниже уже готов,
+# просто раскомментируйте его и профиль "full".
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vertical-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vertical
+      POSTGRES_PASSWORD: vertical_local_pass
+      POSTGRES_DB: vertical
+    ports:
+      - "5433:5432"
+    volumes:
+      - vertical_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vertical -d vertical"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: vertical-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - vertical_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Adminer — веб-интерфейс для просмотра базы, "Excel-просмотрщик" для Postgres.
+  # Открывается на http://localhost:8080 (система: PostgreSQL, сервер: postgres,
+  # пользователь: vertical, пароль: vertical_local_pass, база: vertical).
+  adminer:
+    image: adminer:latest
+    container_name: vertical-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+
+  # Опциональный сервис — сам BFF API внутри докера (профиль "full").
+  # Запуск: docker compose --profile full up -d
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vertical-api
+    restart: unless-stopped
+    profiles: ["full"]
+    env_file:
+      - .env
+    environment:
+      # Внутри докер-сети сервисы видны по имени сервиса, а не localhost
+      DATABASE_URL: "postgresql://vertical:vertical_local_pass@postgres:5432/vertical?schema=public"
+      REDIS_URL: "redis://redis:6379"
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  vertical_pg_data:
+  vertical_redis_data:
