@@ -30,7 +30,12 @@ export function signRefreshToken(clientId: string): { token: string; jti: string
 
 export function verifyRefreshToken(token: string): RefreshPayload {
   try {
-    return jwt.verify(token, env.jwt.refreshSecret) as RefreshPayload;
+    const payload = jwt.verify(token, env.jwt.refreshSecret) as RefreshPayload;
+    // Return only the required fields, excluding JWT metadata (exp, iat, etc.)
+    return {
+      clientId: payload.clientId,
+      jti: payload.jti,
+    };
   } catch {
     throw new ApiError(401, "unauthorized");
   }

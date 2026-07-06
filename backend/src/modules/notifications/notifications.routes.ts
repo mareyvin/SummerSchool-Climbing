@@ -17,8 +17,9 @@ export async function notificationsRoutes(app: FastifyInstance) {
   });
 
   app.delete("/notifications/web-push-subscriptions", { preHandler: [app.authenticate] }, async (request, reply) => {
+    const clientId = (request.user as { clientId: string }).clientId;
     const { endpoint } = z.object({ endpoint: z.string().url() }).parse(request.body);
-    await deleteSubscription(app.prisma, endpoint);
+    await deleteSubscription(app.prisma, clientId, endpoint);
     reply.code(204).send();
   });
 }

@@ -11,12 +11,24 @@ export async function saveSubscription(
   auth: string
 ) {
   return prisma.webPushSubscription.upsert({
-    where: { endpoint },
+    where: {
+      clientId_endpoint: {
+        clientId,
+        endpoint,
+      },
+    },
     update: { p256dh, auth },
     create: { clientId, endpoint, p256dh, auth },
   });
 }
 
-export async function deleteSubscription(prisma: PrismaClient, endpoint: string) {
-  return prisma.webPushSubscription.deleteMany({ where: { endpoint } });
+export async function deleteSubscription(prisma: PrismaClient, clientId: string, endpoint: string) {
+  return prisma.webPushSubscription.delete({
+    where: {
+      clientId_endpoint: {
+        clientId,
+        endpoint,
+      },
+    },
+  });
 }

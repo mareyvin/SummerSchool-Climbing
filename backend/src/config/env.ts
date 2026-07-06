@@ -53,7 +53,8 @@ export const env = {
   },
 
   telegram: {
-    botToken: process.env.TELEGRAM_BOT_TOKEN ?? "",
+    // Read from process.env at runtime to allow tests to override the value.
+    get botToken() { return process.env.TELEGRAM_BOT_TOKEN ?? ""; },
     // Максимальный возраст auth_date из Telegram Login Widget (защита от replay).
     authMaxAgeSeconds: Number(process.env.TELEGRAM_AUTH_MAX_AGE_SECONDS ?? 24 * 60 * 60),
   },

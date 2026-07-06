@@ -13,6 +13,6 @@ export function getIdempotencyKey(headers: Record<string, unknown>): string {
   return key;
 }
 
-export async function findExistingBookingByKey(prisma: PrismaClient, key: string) {
-  return prisma.booking.findUnique({ where: { idempotencyKey: key } });
+export async function findExistingBookingByKey(prisma: PrismaClient, key: string, clientId: string) {
+  return prisma.booking.findUnique({ where: { clientId_idempotencyKey: { clientId, idempotencyKey: key } } });
 }

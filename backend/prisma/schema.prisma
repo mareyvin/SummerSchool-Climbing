@@ -26,16 +26,17 @@ model Booking {
   id                     String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   clientId               String            @map("client_id") @db.Uuid
   slotId                 String            @map("slot_id") @db.Uuid
-  instructor_id          String            @db.Uuid
+  instructor_id          String?           @db.Uuid
   equipmentChoice        String            @map("equipment_choice") @db.VarChar(10)
   status                 String            @default("active") @db.VarChar(20)
   cancel_reason          String?
   idempotencyKey         String            @map("idempotency_key") @db.Uuid
-  idempotency_body_hash  String            @db.Char(64)
+  idempotency_body_hash  String?           @db.Char(64)
+  priceTotal             Float?            @map("price_total")
   createdAt              DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
   cancelledAt            DateTime?         @map("cancelled_at") @db.Timestamptz(6)
-  slot_start_at_snapshot DateTime          @db.Timestamptz(6)
-  zone_format_snapshot   String
+  slot_start_at_snapshot DateTime?         @db.Timestamptz(6)
+  zone_format_snapshot   String?
   duration_min_snapshot  Int               @default(90) @db.SmallInt
   client                 Client            @relation(fields: [clientId], references: [id], onUpdate: NoAction)
   notifications_log      NotificationLog[]

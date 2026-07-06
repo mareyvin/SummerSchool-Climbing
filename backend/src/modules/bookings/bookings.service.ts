@@ -18,7 +18,7 @@ interface CreateBookingInput {
 //    в текущем контракте есть только read-only GET /slots, см. TODO ниже);
 // 3) при успехе сохраняет бронь у себя (это единственная точка правды по Booking).
 export async function createBooking(prisma: PrismaClient, input: CreateBookingInput) {
-  const existing = await findExistingBookingByKey(prisma, input.idempotencyKey);
+  const existing = await findExistingBookingByKey(prisma, input.idempotencyKey, input.clientId);
   if (existing) {
     // Повтор той же операции — возвращаем прежний результат, а не создаём дубль (NFR-9).
     return existing;

@@ -5,12 +5,32 @@ import type { Redis } from "ioredis";
 import { env } from "../../config/env.js";
 import { ApiError } from "../../lib/errors.js";
 
-// NFR-20: маскирование номера в логах — "+7 *** *** ** 67"
+// NFR-20: маскирование номера в логах — "X XXX *** **-**-X"
 export function maskPhone(phone: string): string {
   if (phone.length < 4) return "***";
-  const last2 = phone.slice(-2);
-  const prefix = phone.slice(0, 2); // напр. "+7"
-  return `${prefix} *** *** ** ${last2}`;
+  
+  // Check if number starts with +7
+  const hasPlusPrefix = phone.startsWith("+7");
+  let cleanPhone = phone;
+  if (hasPlusPrefix) {
+    cleanPhone = phone.slice(1); // Remove +, keep 7900...
+  }
+  
+  // Extract components: prefix (1 digit), area code (3 digits), last digit only
+  const prefix = cleanPhone.slice(0, 1); // e.g., "8" or "7"
+  const areaCode = cleanPhone.slice(1, 4); // e.g., "900"
+  const lastDigit = cleanPhone.slice(-1); // e.g., "7"
+  
+  const formatted = `${prefix} ${areaCode} *** **-**-${lastDigit}`;
+  return hasPlusPrefix ? `+${formatted}` : formatted;
+}
+
+// maskPhoneForLogging - для логов, опционально показывает полный номер
+export function maskPhoneForLogging(phone: string, full: boolean = false): string {
+  if (full) {
+    return phone;
+  }
+  return maskPhone(phone);
 }
 
 function codeKey(phone: string): string {
