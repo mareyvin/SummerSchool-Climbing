@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Вертикаль — демо</title>
+
+<!-- ==========================================================
+     НАСТРОЙКА ПОД ВАШ БЭКЕНД — единственное место, которое
+     нужно поправить, чтобы подключить реальный эндпоинт списка
+     тренировок. Если он недоступен/упадёт — приложение само
+     переключится на моковые данные (см. CONFIG.SLOTS_PATH ниже).
+     ========================================================== -->
+<script>
+  // Можно переопределить прямо в URL, без правки файла:
+  //   vertikal-demo.html?api=http://localhost:3000
+  const __qs = new URLSearchParams(location.search);
+  window.CONFIG = {
+    API_BASE: __qs.get('api') || "http://localhost:3000", // адрес запущенного backend (npm run dev -> :3000)
+    SLOTS_PATH: "/slots",      // напр. "/api/v1/slots"
+    FETCH_TIMEOUT_MS: 3500
+  };
+</script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          concrete: { 950: '#15171a', 900: '#1c1f22', 800: '#26292d', 700: '#33373c', 600: '#484d54' },
+          chalk: '#f1ede3',
+          hold: '#ffb020',
+          rope: '#8fa998'
+        },
+        fontFamily: {
+          display: ['Oswald', 'sans-serif'],
+          body: ['Inter', 'sans-serif']
+        }
+      }
+    }
+  }
+</script>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<style>
+  body { font-family: 'Inter', sans-serif; background: #15171a; }
+  .font-display { font-family: 'Oswald', sans-serif; letter-spacing: 0.02em; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #484d54; border-radius: 3px; }
+</style>
+</head>
+<body class="text-chalk">
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+// ---------------------------------------------------------------
+// МОКОВЫЕ ДАННЫЕ (используются, если реальный эндпоинт недоступен)
+// ---------------------------------------------------------------
+function buildMockSlots() {
+  const now = new Date();
+  const in90m = new Date(now.getTime() + 90 * 60000);
+  const in5h = new Date(now.getTime() + 5 * 3600000);
+  const tomorrow = new Date(now.getTime() + 26 * 3600000);
+  const in2days = new Date(now.getTime() + 50 * 3600000);
+
+  return [
+    {
+      id: 'slot-1', start_at: in90m.toISOString(), duration_min: 90,
+      zone_format: 'boulder_beginner', is_beginner_only: true,
+      instructor: { name: 'Анна', avg_rating: 4.8 },
+      free_seats: 3, capacity_total: 8,
+      rental: { available: true, tariff: 300, low_stock_warning: true },
+      gym_address: 'ул. Складская, 12',
+      status: 'scheduled'
+    },
+    {
+      id: 'slot-2', start_at: in5h.toISOString(), duration_min: 90,
+      zone_format: 'rope_advanced', is_beginner_only: false,
+      instructor: { name: 'Игорь', avg_rating: 4.5 },
+      free_seats: 0, capacity_total: 16,
+      rental: { available: true, tariff: 300, low_stock_warning: false },
+      gym_address: 'ул. Складская, 12',
+      status: 'scheduled'
+    },
+    {
+      id: 'slot-3', start_at: tomorrow.toISOString(), duration_min: 90,
+      zone_format: 'rope_advanced', is_beginner_only: false,
+      instructor: { name: 'Марина', avg_rating: null },
+      free_seats: 9, capacity_total: 16,
+      rental: { available: false, tariff: 300, low_stock_warning: false },
+      gym_address: 'ул. Складская, 12',
+      status: 'scheduled'
+    },
+    {
+      id: 'slot-4', start_at: in2days.toISOString(), duration_min: 90,
+      zone_format: 'boulder_beginner', is_beginner_only: true,
+      instructor: { name: 'Анна', avg_rating: 4.8 },
+      free_seats: 5, capacity_total: 8,
+      rental: { available: true, tariff: 300, low_stock_warning: false },
+      gym_address: 'ул. Складская, 12',
+      status: 'cancelled_by_gym', cancel_reason: 'профилактика зоны'
+    }
+  ];
+}
+
+const ZONE_LABEL = {
+  boulder_beginner: 'Болдеринг · для новичков',
+  rope_advanced: 'Трассы с верёвкой'
+};
+
+// ---------------------------------------------------------------
+// Утилиты
+// ---------------------------------------------------------------
+function fmtDateTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleString('ru-RU', { weekday: 'short', day: '2-digit', month: 'long', hour: '2-digit', minute: '2-digit' });
+}
+function hoursUntil(iso) {
+  return (new Date(iso).getTime() - Date.now()) / 3600000;
+}
+function normalizeSlot(raw, i) {
+  return {
+    id: raw.id ?? raw.slot_id ?? `slot-${i}`,
+    start_at: raw.start_at ?? raw.startAt ?? raw.date ?? new Date().toISOString(),
+    zone_format: raw.zone_format ?? raw.zone ?? 'rope_advanced',
+    is_beginner_only: raw.is_beginner_only ?? raw.is_beginner ?? false,
+    instructor: {
+      name: raw.instructor?.name ?? raw.instructor_name ?? '—',
+      avg_rating: raw.instructor?.avg_rating ?? raw.avg_rating ?? null
+    },
+    free_seats: raw.free_seats ?? raw.available_seats ?? 0,
+    capacity_total: raw.capacity_total ?? raw.total_seats ?? raw.capacity ?? 0,
+    rental: {
+      available: raw.rental?.available ?? raw.rental_available ?? false,
+      tariff: raw.rental?.tariff ?? raw.rental_tariff ?? 0,
+      low_stock_warning: raw.rental?.low_stock_warning ?? false
+    },
+    gym_address: raw.gym_address ?? raw.address ?? 'ул. Складская, 12',
+    status: raw.status ?? 'scheduled',
+    cancel_reason: raw.cancel_reason ?? null
+  };
+}
+
+// ---------------------------------------------------------------
+// Общие UI-компоненты
+// ---------------------------------------------------------------
+function Badge({ tone, children }) {
+  const tones = {
+    danger: 'bg-red-500/15 text-red-300 border-red-500/30',
+    warn: 'bg-hold/15 text-hold border-hold/30',
+    ok: 'bg-rope/15 text-rope border-rope/30',
+    neutral: 'bg-concrete-700 text-chalk/70 border-concrete-600'
+  };
+  return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${tones[tone]}`}>{children}</span>;
+}
+
+function Toast({ message, onClose }) {
+  useEffect(() => {
+    if (!message) return;
+    const t = setTimeout(onClose, 3200);
+    return () => clearTimeout(t);
+  }, [message]);
+  if (!message) return null;
+  return (
+    <div className="fixed bottom-20 left-1/2 -translate-x-1/2 bg-concrete-800 border border-concrete-600 text-chalk px-4 py-3 rounded-xl shadow-2xl z-50 text-sm max-w-[90vw] text-center">
+      {message}
+    </div>
+  );
+}
+
+function DataSourceTag({ source }) {
+  return source === 'real'
+    ? <span className="text-[11px] text-rope flex items-center gap-1">● реальные данные с сервера</span>
+    : <span className="text-[11px] text-hold flex items-center gap-1">● демо-данные (бэкенд недоступен / не настроен)</span>;
+}
+
+function BackButton({ onClick }) {
+  return <button onClick={onClick} className="text-chalk/60 text-sm mb-4">← Назад</button>;
+}
+
+function BottomNav({ tab, setTab, activeCount }) {
+  const item = (id, label) => (
+    <button onClick={() => setTab(id)} className={`flex-1 py-3 text-sm font-medium ${tab===id ? 'text-hold' : 'text-chalk/50'}`}>{label}</button>
+  );
+  return (
+    <div className="fixed bottom-0 inset-x-0 border-t border-concrete-700 bg-concrete-900/95 backdrop-blur z-20">
+      <div className="max-w-md lg:max-w-3xl mx-auto flex">
+        {item('slots', 'Тренировки')}
+        {item('mybookings', `Мои записи${activeCount ? ' (' + activeCount + ')' : ''}`)}
+        {item('profile', 'Профиль')}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------
+// SCR-001. Вход
+// Пытается пройти реальный OTP-флоу бэкенда (POST /auth/otp/request,
+// POST /auth/otp/verify). Если бэкенд недоступен/вернул ошибку —
+// открыто говорим об этом и предлагаем демо-вход без токена
+// (тогда /slots тоже пойдёт в моки — см. loadSlots в App).
+// ---------------------------------------------------------------
+function LoginScreen({ onLogin }) {
+  const [step, setStep] = useState('phone');
+  const [phone, setPhone] = useState('');
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [backendReachable, setBackendReachable] = useState(true);
+
+  const apiUrl = (path) => (window.CONFIG.API_BASE || '') + path;
+
+  const requestCode = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const res = await fetch(apiUrl('/auth/otp/request'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone })
+      });
+      if (!res.ok) throw new Error('otp/request → ' + res.status);
+      setBackendReachable(true);
+      setStep('code');
+    } catch (e) {
+      console.warn('Бэкенд недоступен на otp/request, включаю демо-вход:', e.message);
+      setBackendReachable(false);
+      setStep('code'); // в демо-режиме код проверять не у кого — просто идём дальше
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const verifyCode = async () => {
+    if (!backendReachable) {
+      // Демо-режим: бэкенд не ответил на предыдущем шаге, токена не будет.
+      onLogin({ phone: phone || '+7 999 000-00-00', accessToken: null });
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const res = await fetch(apiUrl('/auth/otp/verify'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, code, name: 'Демо-клиент' })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.code === 'invalid_code' ? 'Неверный код. Попробуйте ещё раз' : 'Не удалось войти (' + res.status + ')');
+        return;
+      }
+      if (data.is_new_client && !data.access_token) {
+        // Сервер просит имя — в демо просто повторяем запрос с именем (см. body выше),
+        // сюда попадать не должны, но на всякий случай логинимся без токена.
+        onLogin({ phone, accessToken: null });
+        return;
+      }
+      onLogin({ phone, accessToken: data.access_token || null });
+    } catch (e) {
+      console.warn('Бэкенд недоступен на otp/verify, включаю демо-вход:', e.message);
+      onLogin({ phone: phone || '+7 999 000-00-00', accessToken: null });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-8">
+          <div className="font-display text-3xl tracking-wide">ВЕРТИКАЛЬ</div>
+          <div className="text-chalk/50 text-sm mt-1">Запись на тренировки</div>
+        </div>
+
+        {step === 'phone' && (
+          <div className="space-y-3">
+            <label className="text-sm text-chalk/70">Номер телефона</label>
+            <input
+              value={phone}
+              onChange={e => setPhone(e.target.value)}
+              placeholder="+7 999 123-45-67"
+              className="w-full bg-concrete-800 border border-concrete-600 rounded-xl px-4 py-3 text-chalk placeholder-chalk/30 outline-none focus:border-hold"
+            />
+            <button
+              disabled={!phone.trim() || busy}
+              onClick={requestCode}
+              className="w-full py-3 rounded-xl bg-hold text-concrete-950 font-semibold disabled:opacity-40"
+            >
+              {busy ? 'Отправка…' : 'Получить код'}
+            </button>
+            <div className="text-center text-chalk/30 text-xs">или</div>
+            <button onClick={() => onLogin({ phone: '+7 999 000-00-00', accessToken: null })} className="w-full py-3 rounded-xl border border-concrete-600 text-chalk">
+              Войти через Telegram (демо)
+            </button>
+          </div>
+        )}
+
+        {step === 'code' && (
+          <div className="space-y-3">
+            {!backendReachable && (
+              <div className="text-xs text-hold bg-hold/10 border border-hold/30 rounded-lg p-2">
+                Бэкенд ({window.CONFIG.API_BASE || 'не задан'}) не ответил на запрос кода — продолжаем в демо-режиме без токена. Список тренировок будет из моков.
+              </div>
+            )}
+            <label className="text-sm text-chalk/70">
+              {backendReachable ? 'Код из SMS' : 'Код из SMS (демо — подойдёт любой)'}
+            </label>
+            <input
+              value={code}
+              onChange={e => setCode(e.target.value)}
+              placeholder="1234"
+              maxLength={6}
+              className="w-full bg-concrete-800 border border-concrete-600 rounded-xl px-4 py-3 text-chalk placeholder-chalk/30 outline-none focus:border-hold tracking-[0.5em] text-center text-xl"
+            />
+            {error && <div className="text-xs text-red-300">{error}</div>}
+            <button
+              disabled={code.trim().length === 0 || busy}
+              onClick={verifyCode}
+              className="w-full py-3 rounded-xl bg-hold text-concrete-950 font-semibold disabled:opacity-40"
+            >
+              {busy ? 'Проверка…' : 'Войти'}
+            </button>
+            <button onClick={() => setStep('phone')} className="w-full text-chalk/50 text-sm py-2">← изменить номер</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------
+// SCR-002. Список тренировок
+// ---------------------------------------------------------------
+function SlotList({ slots, loading, onOpenSlot, dataSource, isBooked }) {
+  return (
+    <div className="p-4 pb-24 max-w-md mx-auto lg:max-w-3xl">
+      <div className="flex items-center justify-between mb-1">
+        <h1 className="font-display text-2xl font-semibold">Тренировки</h1>
+      </div>
+      <div className="mb-4"><DataSourceTag source={dataSource} /></div>
+
+      {loading && (
+        <div className="space-y-3">
+          {[1,2,3].map(i => <div key={i} className="h-24 rounded-2xl bg-concrete-800 animate-pulse" />)}
+        </div>
+      )}
+
+      {!loading && slots.length === 0 && (
+        <div className="text-center text-chalk/60 py-16">Пока нет доступных тренировок</div>
+      )}
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        {!loading && slots.map(slot => {
+          const full = slot.free_seats <= 0;
+          const cancelled = slot.status === 'cancelled_by_gym';
+          const booked = isBooked(slot.id);
+          return (
+            <button
+              key={slot.id}
+              onClick={() => onOpenSlot(slot)}
+              className={`text-left rounded-2xl border p-4 transition ${cancelled || full ? 'border-concrete-700 bg-concrete-900/60 opacity-70' : 'border-concrete-700 bg-concrete-800 hover:border-hold/50 active:scale-[0.99]'}`}
+            >
+              <div className="flex justify-between items-start gap-2">
+                <div className="font-display text-lg">{fmtDateTime(slot.start_at)}</div>
+                {cancelled && <Badge tone="danger">Отменена скалодромом</Badge>}
+                {!cancelled && full && <Badge tone="danger">Мест нет</Badge>}
+                {!cancelled && !full && booked && <Badge tone="ok">Забронировано</Badge>}
+                {!cancelled && !full && !booked && slot.is_beginner_only && <Badge tone="warn">Для новичков</Badge>}
+              </div>
+              <div className="text-sm text-chalk/70 mt-1">{ZONE_LABEL[slot.zone_format] || slot.zone_format}</div>
+              <div className="flex items-center justify-between mt-3 text-sm">
+                <span>Инструктор: {slot.instructor.name} {slot.instructor.avg_rating ? `★ ${slot.instructor.avg_rating}` : '· Нет оценок'}</span>
+                {!cancelled && <span className="font-medium">{slot.free_seats} из {slot.capacity_total}</span>}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------
+// SCR-003. Карточка тренировки
+// ---------------------------------------------------------------
+function SlotCard({ slot, client, onBack, onGoBook, isBooked }) {
+  const full = slot.free_seats <= 0;
+  const cancelled = slot.status === 'cancelled_by_gym';
+  const beginnerBlocked = slot.is_beginner_only && !client.is_beginner;
+  const booked = isBooked(slot.id);
+
+  return (
+    <div className="p-4 max-w-md mx-auto lg:max-w-xl">
+      <BackButton onClick={onBack} />
+      <h1 className="font-display text-2xl mb-1">{fmtDateTime(slot.start_at)}</h1>
+      <div className="text-chalk/70 mb-4">{ZONE_LABEL[slot.zone_format]} {slot.is_beginner_only && <Badge tone="warn">Для новичков</Badge>}</div>
+
+      <div className="rounded-2xl border border-concrete-700 bg-concrete-800 p-4 space-y-3 mb-4">
+        <div className="flex justify-between text-sm">
+          <span className="text-chalk/60">Инструктор</span>
+          <span>{slot.instructor.name} {slot.instructor.avg_rating ? `★ ${slot.instructor.avg_rating}` : '· Нет оценок'}</span>
+        </div>
+        <div className="flex justify-between text-sm">
+          <span className="text-chalk/60">Свободно мест</span>
+          <span className="font-medium">{slot.free_seats} из {slot.capacity_total}</span>
+        </div>
+        <div className="flex justify-between text-sm">
+          <span className="text-chalk/60">Прокат снаряжения</span>
+          <span>{slot.rental.available ? `доступен · ${slot.rental.tariff} ₽` : 'недоступен'}</span>
+        </div>
+        <div className="flex justify-between text-sm">
+          <span className="text-chalk/60">Адрес</span>
+          <span>{slot.gym_address}</span>
+        </div>
+      </div>
+
+      {cancelled && <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-4 text-sm">Тренировка отменена скалодромом{slot.cancel_reason ? ` (${slot.cancel_reason})` : ''}.</div>}
+      {!cancelled && full && !booked && <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-4 text-sm">Мест не осталось.</div>}
+      {!cancelled && beginnerBlocked && !booked && <div className="rounded-xl bg-hold/10 border border-hold/30 p-4 text-sm">Тренировка только для новичков.</div>}
+
+      {!cancelled && !full && !beginnerBlocked && (
+        <button
+          disabled={booked}
+          onClick={onGoBook}
+          className="w-full py-3 rounded-xl bg-hold text-concrete-950 font-semibold disabled:opacity-50 disabled:bg-concrete-600 disabled:text-chalk/60"
+        >
+          {booked ? 'Забронировано' : 'Записаться'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------
+// SCR-004. Оформление записи (упрощённо — без выбора дат,
+// подтверждение сразу меняет состояние кнопки)
+// ---------------------------------------------------------------
+function BookingScreen({ slot, onBack, onConfirm, isBooked }) {
+  const [equipment, setEquipment] = useState('own');
+  const [submitting, setSubmitting] = useState(false);
+  const booked = isBooked(slot.id);
+
+  const handleConfirm = () => {
+    setSubmitting(true);
+    setTimeout(() => {
+      setSubmitting(false);
+      onConfirm(equipment);
+    }, 450);
+  };
+
+  return (
+    <div className="p-4 max-w-md mx-auto lg:max-w-xl">
+      <BackButton onClick={onBack} />
+      <h1 className="font-display text-2xl mb-1">Оформление записи</h1>
+      <div className="text-chalk/70 mb-4">{fmtDateTime(slot.start_at)} · {ZONE_LABEL[slot.zone_format]}</div>
+
+      <div className="space-y-4">
+        <div>
+          <div className="text-sm font-medium mb-2">Снаряжение</div>
+          <div className="flex gap-2">
+            <button
+              disabled={booked}
+              onClick={() => setEquipment('own')}
+              className={`flex-1 py-3 rounded-xl border text-sm disabled:opacity-40 ${equipment==='own' ? 'border-hold bg-hold/10 text-hold' : 'border-concrete-600 bg-concrete-800'}`}
+            >Своё</button>
+            <button
+              disabled={!slot.rental.available || booked}
+              onClick={() => setEquipment('rental')}
+              className={`flex-1 py-3 rounded-xl border text-sm disabled:opacity-40 ${equipment==='rental' ? 'border-hold bg-hold/10 text-hold' : 'border-concrete-600 bg-concrete-800'}`}
+            >Прокат</button>
+          </div>
+          {slot.rental.low_stock_warning && (
+            <div className="text-xs text-hold mt-2">ⓘ Прокатного снаряжения может не хватить на всех записавшихся.</div>
+          )}
+          {equipment === 'rental' && slot.rental.available && (
+            <div className="text-sm text-chalk/70 mt-2">Тариф проката: {slot.rental.tariff} ₽</div>
+          )}
+        </div>
+
+        <div className="text-xs text-chalk/50">ⓘ Оплата на месте: наличные или перевод на карту.</div>
+
+        <button
+          onClick={handleConfirm}
+          disabled={submitting || booked}
+          className="w-full py-3 rounded-xl font-semibold disabled:opacity-70 transition
+                     bg-hold text-concrete-950 disabled:bg-rope disabled:text-concrete-950"
+        >
+          {submitting ? 'Отправка…' : booked ? 'Забронировано' : 'Забронировать'}
+        </button>
+
+        {booked && (
+          <div className="text-center text-sm text-rope">✓ Бронь оформлена. Оплата на месте.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------
+// Статус-бейдж брони
+// ---------------------------------------------------------------
+function statusBadge(b) {
+  if (b.status === 'active') return <Badge tone="ok">Активна</Badge>;
+  if (b.status === 'cancelled_early') return <Badge tone="neutral">Отменена</Badge>;
+  if (b.status === 'cancelled_late') return <Badge tone="warn">Поздняя отмена</Badge>;
+  return <Badge tone="neutral">{b.status}</Badge>;
+}
+
+function BookingRow({ b, onOpenCancel }) {
+  const canCancel = b.status === 'active' && hoursUntil(b.slot.start_at) > 0;
+  return (
+    <div className="rounded-2xl border border-concrete-700 bg-concrete-800 p-4">
+      <div className="flex justify-between items-start">
+        <div className="font-display text-lg">{fmtDateTime(b.slot.start_at)}</div>
+        {statusBadge(b)}
+      </div>
+      <div className="text-sm text-chalk/70 mt-1">
+        {ZONE_LABEL[b.slot.zone_format]} · {b.slot.instructor.name} · {b.equipment_choice === 'rental' ? `Прокат (${b.slot.rental.tariff} ₽)` : 'Своё снаряжение'}
+      </div>
+      {canCancel && (
+        <button onClick={() => onOpenCancel(b)} className="mt-3 text-sm text-red-300 border border-red-500/30 rounded-lg px-3 py-1.5">
+          Отменить запись
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------
+// SCR-005. Мои бронирования
+// ---------------------------------------------------------------
+function MyBookings({ bookings, onOpenCancel }) {
+  return (
+    <div className="p-4 pb-24 max-w-md mx-auto lg:max-w-3xl">
+      <h1 className="font-display text-2xl mb-4">Мои бронирования</h1>
+      {bookings.length === 0 && <div className="text-center text-chalk/60 py-16">У вас пока нет записей</div>}
+      <div className="space-y-3">
+        {bookings.slice().reverse().map(b => <BookingRow key={b.id} b={b} onOpenCancel={onOpenCancel} />)}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------
+// SCR-007. Профиль клиента (+ отмена брони прямо здесь)
+// ---------------------------------------------------------------
+function Profile({ client, phone, bookings, onOpenCancel, onLogout }) {
+  const active = bookings.filter(b => b.status === 'active');
+  return (
+    <div className="p-4 pb-24 max-w-md mx-auto lg:max-w-3xl">
+      <h1 className="font-display text-2xl mb-4">Профиль</h1>
+
+      <div className="rounded-2xl border border-concrete-700 bg-concrete-800 p-4 mb-4">
+        <div className="text-xs text-chalk/50">Имя</div>
+        <div className="mb-3">{client.name}</div>
+        <div className="text-xs text-chalk/50">Телефон</div>
+        <div>{phone}</div>
+      </div>
+
+      <div className="mb-2 text-sm font-medium text-chalk/70">Активные брони — отменить можно прямо здесь</div>
+      {active.length === 0 && <div className="text-chalk/50 text-sm mb-4">Активных броней нет.</div>}
+      <div className="space-y-3 mb-6">
+        {active.map(b => <BookingRow key={b.id} b={b} onOpenCancel={onOpenCancel} />)}
+      </div>
+
+      <button onClick={onLogout} className="w-full py-3 rounded-xl border border-red-500/30 text-red-300">
+        Выйти
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------
+// BS-003. Подтверждение отмены
+// ---------------------------------------------------------------
+function CancelModal({ booking, onClose, onConfirm }) {
+  if (!booking) return null;
+  const hrs = hoursUntil(booking.slot.start_at);
+  const early = hrs >= 2;
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-end lg:items-center justify-center z-40">
+      <div className="bg-concrete-800 border border-concrete-600 rounded-t-2xl lg:rounded-2xl w-full max-w-md p-5">
+        <h2 className="font-display text-xl mb-2">Отменить запись?</h2>
+        <p className="text-sm text-chalk/70 mb-4">
+          {early
+            ? 'Отмена сейчас — ранняя, место освободится.'
+            : 'Отмена сейчас — поздняя, место не освободится (штрафов нет).'}
+        </p>
+        <button onClick={() => onConfirm(early)} className="w-full py-3 rounded-xl bg-hold text-concrete-950 font-semibold mb-2">Да, отменить</button>
+        <button onClick={onClose} className="w-full py-3 rounded-xl border border-concrete-600 text-chalk">Не отменять</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------
+// Приложение
+// ---------------------------------------------------------------
+function App() {
+  const [loggedIn, setLoggedIn] = useState(false);
+  const [phone, setPhone] = useState('');
+  const [accessToken, setAccessToken] = useState(null); // NFR-18: access живёт только в памяти, не в localStorage
+  const client = { name: 'Тори', is_beginner: false };
+
+  const [slots, setSlots] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [dataSource, setDataSource] = useState('mock');
+
+  const [screen, setScreen] = useState('slots'); // slots | slotcard | booking | mybookings | profile
+  const [tab, setTab] = useState('slots');       // slots | mybookings | profile (для нижней навигации)
+  const [selectedSlot, setSelectedSlot] = useState(null);
+
+  const [bookings, setBookings] = useState([]);
+  const [cancelTarget, setCancelTarget] = useState(null);
+  const [toast, setToast] = useState('');
+
+  const isBooked = useCallback((slotId) => bookings.some(b => b.slot.id === slotId && b.status === 'active'), [bookings]);
+
+  const loadSlots = useCallback(async () => {
+    setLoading(true);
+    const url = (window.CONFIG.API_BASE || '') + window.CONFIG.SLOTS_PATH;
+    try {
+      if (!accessToken) throw new Error('нет access-токена (демо-вход без бэкенда) — сразу в моки');
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), window.CONFIG.FETCH_TIMEOUT_MS);
+      // GET /slots на бэкенде защищён app.authenticate — без этого заголовка всегда 401,
+      // и до этого фикса фронт тихо проваливался в моки, даже когда бэкенд был жив.
+      const res = await fetch(url, {
+        signal: controller.signal,
+        headers: { Accept: 'application/json', Authorization: `Bearer ${accessToken}` }
+      });
+      clearTimeout(timer);
+      if (res.status === 401) throw new Error('401 unauthorized — токен не принят бэкендом');
+      if (!res.ok) throw new Error('bad status ' + res.status);
+      const data = await res.json();
+      const items = Array.isArray(data) ? data : (data.items || data.slots || data.data || []);
+      if (!items.length) throw new Error('empty response');
+      setSlots(items.map(normalizeSlot));
+      setDataSource('real');
+    } catch (e) {
+      console.warn('Реальный эндпоинт слотов недоступен, использую моки:', e.message);
+      setSlots(buildMockSlots());
+      setDataSource('mock');
+    } finally {
+      setLoading(false);
+    }
+  }, [accessToken]);
+
+  useEffect(() => { if (loggedIn) loadSlots(); }, [loggedIn, loadSlots]);
+
+  const goTab = (id) => { setTab(id); setScreen(id); setSelectedSlot(null); };
+
+  const handleLogin = ({ phone: ph, accessToken: token }) => {
+    setPhone(ph);
+    setAccessToken(token);
+    setLoggedIn(true);
+    setScreen('slots');
+    setTab('slots');
+  };
+  const handleLogout = () => {
+    setLoggedIn(false);
+    setAccessToken(null);
+    setScreen('slots');
+    setTab('slots');
+    setSelectedSlot(null);
+  };
+
+  const openSlotCard = (slot) => { setSelectedSlot(slot); setScreen('slotcard'); };
+  const goToBooking = () => setScreen('booking');
+  const backFromSlotCard = () => { setSelectedSlot(null); setScreen('slots'); };
+  const backFromBooking = () => setScreen('slotcard');
+
+  const handleConfirmBooking = (equipment) => {
+    const slot = selectedSlot;
+    setSlots(prev => prev.map(s => s.id === slot.id ? { ...s, free_seats: s.free_seats - 1 } : s));
+    const booking = {
+      id: 'b-' + Date.now(),
+      slot: { ...slot, free_seats: slot.free_seats - 1 },
+      equipment_choice: equipment,
+      status: 'active',
+      created_at: new Date().toISOString()
+    };
+    setBookings(prev => [...prev, booking]);
+    setToast('Вы записаны. Оплата на месте.');
+  };
+
+  const handleConfirmCancel = (early) => {
+    const target = cancelTarget;
+    setBookings(prev => prev.map(b => b.id === target.id ? { ...b, status: early ? 'cancelled_early' : 'cancelled_late' } : b));
+    if (early) {
+      setSlots(prev => prev.map(s => s.id === target.slot.id ? { ...s, free_seats: s.free_seats + 1 } : s));
+    }
+    setCancelTarget(null);
+    setToast(early ? 'Бронь отменена' : 'Поздняя отмена: место не освобождено (правило 2 часов). Штраф не взимается.');
+  };
+
+  if (!loggedIn) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
+  const activeCount = bookings.filter(b => b.status === 'active').length;
+  const showNav = screen === 'slots' || screen === 'mybookings' || screen === 'profile';
+
+  return (
+    <div className="min-h-screen">
+      <div className="border-b border-concrete-700 bg-concrete-900/80 backdrop-blur sticky top-0 z-30">
+        <div className="max-w-md lg:max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
+          <span className="font-display text-lg tracking-wide">ВЕРТИКАЛЬ</span>
+          <span className="text-xs text-chalk/50">{client.name}</span>
+        </div>
+      </div>
+
+      {screen === 'slots' && (
+        <SlotList slots={slots} loading={loading} onOpenSlot={openSlotCard} dataSource={dataSource} isBooked={isBooked} />
+      )}
+      {screen === 'slotcard' && selectedSlot && (
+        <SlotCard slot={selectedSlot} client={client} onBack={backFromSlotCard} onGoBook={goToBooking} isBooked={isBooked} />
+      )}
+      {screen === 'booking' && selectedSlot && (
+        <BookingScreen slot={selectedSlot} onBack={backFromBooking} onConfirm={handleConfirmBooking} isBooked={isBooked} />
+      )}
+      {screen === 'mybookings' && (
+        <MyBookings bookings={bookings} onOpenCancel={setCancelTarget} />
+      )}
+      {screen === 'profile' && (
+        <Profile client={client} phone={phone} bookings={bookings} onOpenCancel={setCancelTarget} onLogout={handleLogout} />
+      )}
+
+      {showNav && <BottomNav tab={tab} setTab={goTab} activeCount={activeCount} />}
+
+      <CancelModal booking={cancelTarget} onClose={() => setCancelTarget(null)} onConfirm={handleConfirmCancel} />
+      <Toast message={toast} onClose={() => setToast('')} />
+    </div>
+  );
+}
+
+</script>
+</body>
+</html>
